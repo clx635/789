@@ -1,0 +1,127 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare project from zip if needed
+        run: |
+          set -e
+
+          echo "== Repo root (before) =="
+          ls -la
+
+          find_project_dir() {
+            local base="$1"
+            local d
+            d="$(find "$base" -maxdepth 12 -type f \\( -name "settings.gradle" -o -name "settings.gradle.kts" \\) -printf "%h\n" 2>/dev/null | head -n 1 || true)"
+            if [ -n "$d" ]; then
+              if [ -f "$d/app/build.gradle" ] || [ -f "$d/app/build.gradle.kts" ]; then
+                echo "$d"
+                return 0
+              fi
+            fi
+            return 1
+          }
+
+          PROJECT_DIR="$(find_project_dir "." || true)"
+
+          if [ -z "$PROJECT_DIR" ]; then
+            ZIP_FILE=""
+            if [ -f "hc06_android.zip" ]; then
+              ZIP_FILE="hc06_android.zip"
+            else
+              ZIP_FILE="$(ls *.zip 2>/dev/null | head -n 1 || true)"
+            fi
+            if [ -z "$ZIP_FILE" ]; then
+              echo "No zip file found in repo root, build will fail"
+              exit 1
+            fi
+
+            echo "== Zip selected =="
+            echo "$ZIP_FILE"
+            ls -la "$ZIP_FILE" || true
+            file "$ZIP_FILE" || true
+
+            echo "== Zip listing (head) =="
+            unzip -l "$ZIP_FILE" | head -n 50 || true
+
+            UNPACK_DIR="__unpacked"
+            rm -rf "$UNPACK_DIR"
+            mkdir -p "$UNPACK_DIR"
+            unzip -q "$ZIP_FILE" -d "$UNPACK_DIR"
+            echo "== Unpacked tree (top) =="
+            ls -la "$UNPACK_DIR" || true
+          fi
+
+          if [ -z "$PROJECT_DIR" ]; then
+            PROJECT_DIR="$(find_project_dir "__unpacked" || true)"
+          fi
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "Project directory not found after unzip, build will fail"
+            echo "== Repo root =="
+            ls -la
+            echo "== Unpacked tree =="
+            ls -la "__unpacked" || true
+            exit 1
+          fi
+
+          if [ "$PROJECT_DIR" = "." ]; then
+            PROJECT_DIR="."
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+          echo "== Repo root =="
+          ls -la
+          echo "== Project tree ($PROJECT_DIR) =="
+          ls -la "$PROJECT_DIR" || true
+          ls -la "$PROJECT_DIR/app" || true
+          test -f "$PROJECT_DIR/settings.gradle" -o -f "$PROJECT_DIR/settings.gradle.kts" || (echo "settings.gradle(.kts) not found, build will fail" && exit 1)
+          test -f "$PROJECT_DIR/app/build.gradle" -o -f "$PROJECT_DIR/app/build.gradle.kts" || (echo "app/build.gradle(.kts) not found, build will fail" && exit 1)
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          api-level: 34
+          build-tools: 34.0.0
+          components: platform-tools
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: "8.7"
+   
+      - name: Install Gradle 8.7
+        run: |
+          curl -sLo gradle.zip https://services.gradle.org/distributions/gradle-8.7-bin.zip
+          unzip -q gradle.zip -d $HOME
+          echo "GRADLE_HOME=$HOME/gradle-8.7" >> $GITHUB_ENV
+          echo "$HOME/gradle-8.7/bin" >> $GITHUB_PATH
+          gradle -v
+
+      - name: Build Debug APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+          gradle :app:assembleDebug --stacktrace --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: hc06-terminal-debug-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
